@@ -2,6 +2,8 @@ use core::error;
 use std::fs;
 use serde_json::Value;
 use serde::Deserialize;
+use std::collections::HashMap;
+
 
 #[derive(Debug, Deserialize)]
 struct CloudTrailEvent {
@@ -20,52 +22,92 @@ struct CloudTrailEvent {
 
     #[serde(rename = "errorMessage")]
     error_message: Option<String>,
+
+    #[serde(rename = "userIdentity")]
+    user_identity: Option<Value>,
 }
 
-fn main() -> Result<(), Box<dyn error::Error>> {
-    // 1. Read file as text
-    let raw = 
-        fs::read_to_string("data/896288137645_CloudTrail_us-east-1_20260105T1610Z_f6znwV3nxqXH7yyg.json")?;
+fn process_cloudtrail_file(path: &str) -> Result<(u32, u32, HashMap<std::string::String, u32>), Box<dyn error::Error>> {
+        let raw = fs::read_to_string(path)?;
+        let data: Value = serde_json::from_str(&raw)?;
+    
+        let mut total_events = 0;
+        let mut error_events = 0;
 
-    // Parse the JSON into a dynamic `Value`
-    let data: Value = serde_json::from_str(&raw)?;
+        let mut errors_by_identity: HashMap<String, u32> = HashMap::new();
+    
+        if let Some(records) = data.get("Records").and_then(|v| v.as_array()) {
+            for record in records {
+                total_events += 1;
+    
+                let event: CloudTrailEvent = match serde_json::from_value(record.clone()) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
 
-    let mut total_events = 0;
-    let mut error_events = 0;
-
-    if let Some(records) = data.get("Records").and_then(|v| v.as_array()) {
-        println!("Found {} CloudTrail records \n", records.len());
-
-        for(idx, record) in records.iter().enumerate() {
-            total_events += 1;
-
-            let event: CloudTrailEvent = match serde_json::from_value(record.clone()) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            println!("Event {}:", idx + 1);
-            println!("  Time:   {}", event.event_time.as_deref().unwrap_or("<missing>"));
-            println!("  Name:   {}", event.event_name.as_deref().unwrap_or("<missing>"));
-            println!("  Source:   {}", event.event_source.as_deref().unwrap_or("<missing>"));
-            
-            // Errors
-            if let Some(code) = &event.error_code {
-                error_events += 1;
-                println!("  [!] ERROR: {}", code);
-
-                if let Some(msg) = &event.error_message {
-                    println!("  Message: {}", msg);
+                // Assume identity may not exist.
+                // Gracefully handle roles vs users (later).
+                // Provides a stable string to count.
+                let identity = event.user_identity.as_ref()
+                    .and_then(|ui| ui.get("userName"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<unknown>");
+    
+                if event.error_code.is_some() {
+                    error_events += 1;
+                    *errors_by_identity.entry(identity.to_string()).or_insert(0) += 1;
                 }
             }
-
-            println!();
         }
-        println!("[+] Summary:");
-        println!("  Total Events: {}", total_events);
-        println!("  Error Events: {}", error_events);
-    } else {
-        println!("[!] Top level `Records` key not found.")
+    
+        Ok((total_events, error_events, errors_by_identity))
+}
+
+
+fn main() -> Result<(), Box<dyn error::Error>> {
+    let log_dir = "data";
+
+    let mut grand_total_events = 0;
+    let mut grand_error_events = 0;
+    let mut grand_errors_by_identity: HashMap<String, u32> = HashMap::new();
+
+    for entry in fs::read_dir(log_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+
+        let path_str = path.to_string_lossy();
+        println!("[*] Processing {}", path_str);
+
+        match process_cloudtrail_file(&path_str) {
+            Ok((total, errors, identities)) => {
+                println!("  Events: {}, Errors: {}", total, errors);
+
+                grand_total_events += total;
+                grand_error_events += errors;
+
+                // merge identity counts
+                for(identity, count) in identities {
+                    *grand_errors_by_identity
+                        .entry(identity)
+                        .or_insert(0) += count;
+                }
+            }
+            Err(e) => {
+                println!("  [!] Failed to process {}: {}", path_str, e);
+            }
+        }
+    }
+    println!("\n[+] Final Summary:");
+    println!("  Total Events: {}", grand_total_events);
+    println!("  Error Events: {}", grand_error_events);
+    println!("\n[+] Error Events by Identity:");
+
+    for (identity, count) in &grand_errors_by_identity {
+        println!("  {}: {}", identity, count);
     }
 
     Ok(())
