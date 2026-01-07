@@ -27,6 +27,49 @@ struct CloudTrailEvent {
     user_identity: Option<Value>,
 }
 
+fn resolve_identity(user_identity: &Value) -> String {
+    let identity_type = user_identity
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
+
+    match identity_type {
+        "IAMUser" => {
+            user_identity
+                .get("userName")
+                .and_then(|v| v.as_str())
+                .map(|u| format!("user: {}", u))
+                .unwrap_or("user:<unkown>".to_string())
+        }
+
+        "AssumedRole" => {
+            if let Some(arn) = user_identity.get("arn").and_then(|v| v.as_str()) {
+                // arn:aws:sts::acct:assumed-role/ROLE/SESSION
+                if let Some(rest) = arn.split("assumed-role/").nth(1) {
+                    return format!("role: {}", rest);
+                }
+            }
+
+            user_identity
+                .get("principalId")
+                .and_then(|v| v.as_str())
+                .map(|p| format!("role-session: {}", p))
+                .unwrap_or("role:<unknown>".to_string())
+        }
+
+        "AWSService" => {
+            user_identity
+                .get("invokedBy")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("service: {}", s))
+                .unwrap_or("service:<unknown>".to_string())
+        }
+
+        other => format!("other: {}", user_identity.get("arn").and_then(|v| v.as_str()).unwrap_or(other)),
+
+    }
+}
+
 fn process_cloudtrail_file(path: &str) -> Result<(u32, u32, HashMap<std::string::String, u32>), Box<dyn error::Error>> {
         let raw = fs::read_to_string(path)?;
         let data: Value = serde_json::from_str(&raw)?;
@@ -45,14 +88,13 @@ fn process_cloudtrail_file(path: &str) -> Result<(u32, u32, HashMap<std::string:
                     Err(_) => continue,
                 };
 
-                // Assume identity may not exist.
-                // Gracefully handle roles vs users (later).
-                // Provides a stable string to count.
-                let identity = event.user_identity.as_ref()
-                    .and_then(|ui| ui.get("userName"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<unknown>");
-    
+                // Gracefully handle roles vs users.
+                let identity = event
+                    .user_identity
+                    .as_ref()
+                    .map(resolve_identity)
+                    .unwrap_or("identity:<missing>".to_string());
+
                 if event.error_code.is_some() {
                     error_events += 1;
                     *errors_by_identity.entry(identity.to_string()).or_insert(0) += 1;
