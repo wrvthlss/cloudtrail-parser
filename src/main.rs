@@ -3,8 +3,11 @@ use std::fs;
 use serde_json::Value;
 use serde::Deserialize;
 use std::collections::HashMap;
+use chrono::{Duration, DateTime, Utc};
 
 const ERROR_THRESHOLD: u32 = 3;
+const WINDOW_MINUTES: i64 = 5;
+
 
 #[derive(Debug, Deserialize)]
 struct CloudTrailEvent {
@@ -71,14 +74,21 @@ fn resolve_identity(user_identity: &Value) -> String {
     }
 }
 
-fn process_cloudtrail_file(path: &str) -> Result<(u32, u32, HashMap<std::string::String, u32>), Box<dyn error::Error>> {
+/*
+    Result<(u32, u32, HashMap<std::string::String, Vec<DateTime<Utc>>>) 
+        u32     -> Total events
+        u32     -> Total errors
+        HashMap -> Key: String, Val: Datetime
+ */
+fn process_cloudtrail_file(path: &str) -> Result<(u32, u32, HashMap<std::string::String, Vec<DateTime<Utc>>>), Box<dyn error::Error>> {
         let raw = fs::read_to_string(path)?;
         let data: Value = serde_json::from_str(&raw)?;
     
         let mut total_events = 0;
         let mut error_events = 0;
 
-        let mut errors_by_identity: HashMap<String, u32> = HashMap::new();
+        // For time windows, place timestamps.
+        let mut errors_by_identity: HashMap<String, Vec<DateTime<Utc>>> = HashMap::new();
     
         if let Some(records) = data.get("Records").and_then(|v| v.as_array()) {
             for record in records {
@@ -89,6 +99,13 @@ fn process_cloudtrail_file(path: &str) -> Result<(u32, u32, HashMap<std::string:
                     Err(_) => continue,
                 };
 
+                // If parsing fails, the event will not participate in time-based logic.
+                let event_time = event
+                    .event_time
+                    .as_ref()
+                    .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
                 // Gracefully handle roles vs users.
                 let identity = event
                     .user_identity
@@ -98,7 +115,14 @@ fn process_cloudtrail_file(path: &str) -> Result<(u32, u32, HashMap<std::string:
 
                 if event.error_code.is_some() {
                     error_events += 1;
-                    *errors_by_identity.entry(identity.to_string()).or_insert(0) += 1;
+
+                    // This identity failed at these exact times.
+                    if let Some(ts) = event_time {
+                        errors_by_identity
+                            .entry(identity.to_string())
+                            .or_insert_with(Vec::new)
+                            .push(ts);
+                    }
                 }
             }
         }
@@ -112,7 +136,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 
     let mut grand_total_events = 0;
     let mut grand_error_events = 0;
-    let mut grand_errors_by_identity: HashMap<String, u32> = HashMap::new();
+    let mut grand_errors_by_identity: HashMap<String, Vec<DateTime<Utc>>> = HashMap::new();
 
     for entry in fs::read_dir(log_dir)? {
         let entry = entry?;
@@ -132,12 +156,21 @@ fn main() -> Result<(), Box<dyn error::Error>> {
                 grand_total_events += total;
                 grand_error_events += errors;
 
-                // merge identity counts
-                for(identity, count) in identities {
-                    *grand_errors_by_identity
+                // merge identity -- count based
+                // for(identity, count) in identities {
+                //     *grand_errors_by_identity
+                //         .entry(identity)
+                //         .or_insert(0) += count;
+                // }
+
+                // merge identity -- time based.
+                for (identity, mut timestamps) in identities {
+                    grand_errors_by_identity
                         .entry(identity)
-                        .or_insert(0) += count;
+                        .or_insert_with(Vec::new)
+                        .append(&mut timestamps);
                 }
+
             }
             Err(e) => {
                 println!("  [!] Failed to process {}: {}", path_str, e);
@@ -149,15 +182,29 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     println!("  Error Events: {}", grand_error_events);
     println!("\n[+] Error Events by Identity:");
 
-    println!("\n[!] Suspicious Identities (>{} errors):", ERROR_THRESHOLD);
+    println!("\n[!] Suspicious Identities (>{} errors in last {} minutes):", ERROR_THRESHOLD, WINDOW_MINUTES);
+
     let mut found_suspicious = false;
 
-    // Identity's count is greater than the error threshold -- suspicious.
-    for (identity, count) in &grand_errors_by_identity {
-        if *count > ERROR_THRESHOLD {
-            println!("  {} ({} errors)", identity, count);
+    for(identity, timestamps)  in &grand_errors_by_identity {
+        if timestamps.is_empty() {
+            continue;
+        }
+
+        // Anchor the window to the current identity's latest event.
+        let latest = timestamps.iter().max().unwrap();
+        let window_start = *latest - Duration::minutes(WINDOW_MINUTES);
+
+        let windowed_count = timestamps
+            .iter()
+            .filter(|ts| **ts >= window_start)
+            .count() as u32;
+
+        if windowed_count > ERROR_THRESHOLD {
+            println!("  {}({} errors)", identity, windowed_count);
             found_suspicious = true;
         }
+
     }
 
     if !found_suspicious {
@@ -166,9 +213,11 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 
     // Identities that are not greater than the error threshold -- normal.
     println!("\n[+] Normal Identities:");
-    for (identity, count) in &grand_errors_by_identity {
-        if *count <= ERROR_THRESHOLD {
-            println!("  {} ({} errors)", identity, count);
+    for (identity, timestamps) in &grand_errors_by_identity {
+        let count = timestamps.len() as u32;
+
+        if count <= ERROR_THRESHOLD {
+            println!("  {} ({:?} errors)", identity, count);
         }
     }
 
