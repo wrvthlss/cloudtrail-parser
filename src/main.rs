@@ -4,6 +4,7 @@ use serde_json::Value;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+const ERROR_THRESHOLD: u32 = 3;
 
 #[derive(Debug, Deserialize)]
 struct CloudTrailEvent {
@@ -148,8 +149,27 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     println!("  Error Events: {}", grand_error_events);
     println!("\n[+] Error Events by Identity:");
 
+    println!("\n[!] Suspicious Identities (>{} errors):", ERROR_THRESHOLD);
+    let mut found_suspicious = false;
+
+    // Identity's count is greater than the error threshold -- suspicious.
     for (identity, count) in &grand_errors_by_identity {
-        println!("  {}: {}", identity, count);
+        if *count > ERROR_THRESHOLD {
+            println!("  {} ({} errors)", identity, count);
+            found_suspicious = true;
+        }
+    }
+
+    if !found_suspicious {
+        println!("  None");
+    }
+
+    // Identities that are not greater than the error threshold -- normal.
+    println!("\n[+] Normal Identities:");
+    for (identity, count) in &grand_errors_by_identity {
+        if *count <= ERROR_THRESHOLD {
+            println!("  {} ({} errors)", identity, count);
+        }
     }
 
     Ok(())
