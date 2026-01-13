@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     // --- Detection --- //
     let findings = detect_with_rules(&grand_errors_by_identity, &rules);
 
-
+    
     println!(
         "\n[!] Detection Findings ({} rule(s)):",
         rules.len()
