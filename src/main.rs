@@ -10,16 +10,55 @@ use core::error;
 use std::fs;
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use std::env;
+
+use crate::detector::{DetectionRule, detect_with_rules};
+
 
 
 fn main() -> Result<(), Box<dyn error::Error>> {
-    let config = DetectorConfig::default();
+    //  --- Parse CLI args ---
+    let args: Vec<String> = env::args().collect();
+
+    let mut threshold = 3;
+    let mut window = 5;
+    let mut i = 1;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--threshold" => {
+                threshold = args.get(i + 1)
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(threshold);
+                i += 2;
+            }
+            "--window" => {
+                window = args.get(i + 1)
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(window);
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+
+    let config = DetectorConfig::new(threshold, window);
 
     let log_dir = "data";
 
     let mut grand_total_events = 0;
     let mut grand_error_events = 0;
     let mut grand_errors_by_identity: HashMap<(String, String), Vec<DateTime<Utc>>> = HashMap::new();
+
+    let rules = vec![
+        DetectionRule {
+            name: "Burst AccessDenied".to_string(),
+            threshold: config.error_threshold,
+            window_minutes: config.window_minutes,
+        },
+    ];
+
 
     for entry in fs::read_dir(log_dir)? {
         let entry = entry?;
@@ -59,29 +98,25 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     println!("\n[+] Error Events by Identity:");
 
     // --- Detection --- //
-    let suspicious = detect_suspicious_identities(&grand_errors_by_identity, &config);
+    let findings = detect_with_rules(&grand_errors_by_identity, &rules);
 
-    println!("\n[!] Suspicious Identities (>{} errors in last {} minutes):",
-        config.error_threshold,
-        config.window_minutes
+
+    println!(
+        "\n[!] Detection Findings ({} rule(s)):",
+        rules.len()
     );
-
-    if suspicious.is_empty() {
-        println!(" None");
+    
+    if findings.is_empty() {
+        println!("  None");
     } else {
-        for ((identity, event_name), count) in &suspicious {
-            println!(" {} :: {} ({} errors)", identity, event_name, count);
+        for (identity, event, rule, count) in findings {
+            println!(
+                "  [{}] {} :: {} ({} errors)",
+                rule, identity, event, count
+            );
         }
     }
-
-    println!("\n[+] Normal Identities:");
-    for (identity, timestamps) in &grand_errors_by_identity {
-        let total = timestamps.len() as u32;
-
-        if !suspicious.iter().any(|(id, _)| id == identity) {
-            println!(" {} :: {} ({} errors)", identity.0, identity.1, total);
-        }
-    }
+    
 
     Ok(())
 }
