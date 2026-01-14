@@ -3,11 +3,31 @@ use std::collections::HashMap;
 
 use crate::config::DetectorConfig;
 
+#[derive(Clone, Copy, Debug)]
+pub enum Severity {
+    Low,
+    Medium,
+    High,
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Severity::Low => "low",
+            Severity::Medium => "medium",
+            Severity::High => "high",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 pub struct DetectionRule {
     pub name: String,
     pub threshold: u32,
     pub window_minutes: i64,
+    pub severity: Severity,
 }
+
 
 // Returns a list of (identity, windowed_error_count).
 // For identities that exceed the configured threshold
@@ -37,7 +57,10 @@ pub fn detect_suspicious_identities( errors: &HashMap<(String, String), Vec<Date
 }
 
 
-pub fn detect_with_rules( errors: &HashMap<(String, String), Vec<DateTime<Utc>>>, rules: &[DetectionRule] ) -> Vec<(String, String, String, u32)> {
+pub fn detect_with_rules(
+    errors: &HashMap<(String, String), Vec<DateTime<Utc>>>,
+    rules: &[DetectionRule],
+) -> Vec<(String, String, String, Severity, u32)> {
     let mut findings = Vec::new();
 
     for rule in rules {
@@ -59,6 +82,7 @@ pub fn detect_with_rules( errors: &HashMap<(String, String), Vec<DateTime<Utc>>>
                     identity.clone(),
                     event_name.clone(),
                     rule.name.clone(),
+                    rule.severity,
                     windowed_count,
                 ));
             }

@@ -1,10 +1,12 @@
 mod config;
 mod parser;
 mod detector;
+mod linux_parser;
 
 use config::DetectorConfig;
 use parser::process_cloudtrail_file;
-use detector::detect_suspicious_identities;
+use linux_parser::parse_ssh_journal;
+
 
 use core::error;
 use std::fs;
@@ -12,7 +14,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use std::env;
 
-use crate::detector::{DetectionRule, detect_with_rules};
+use crate::detector::{DetectionRule, detect_with_rules, Severity};
 
 
 
@@ -56,6 +58,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
             name: "Burst AccessDenied".to_string(),
             threshold: config.error_threshold,
             window_minutes: config.window_minutes,
+            severity: Severity::Medium,
         },
     ];
 
@@ -97,6 +100,29 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     println!("  Error Events: {}", grand_error_events);
     println!("\n[+] Error Events by Identity:");
 
+    // --- Linux SSH log parsing ---
+    let linux_log_path = "data/ssh.log";
+    if std::path::Path::new(linux_log_path).exists() {
+        println!("\n[*] Parsing Linux sshd log: {}", linux_log_path);
+        let linux_errors = parse_ssh_journal(linux_log_path)?;
+        let linux_findings = detect_with_rules(&linux_errors, &rules);
+
+        println!("\n[!] Linux Detection Findings ({} rule(s)):", rules.len());
+        if linux_findings.is_empty() {
+            println!("  None");
+        } else {
+            for (identity, event, rule, severity, count) in linux_findings {
+                println!(
+                    "  [{}:{}] {} :: {} ({} events)",
+                    rule, severity, identity, event, count
+                );
+            }
+        }
+    } else {
+        println!("\n[*] No Linux ssh log found at {}, skipping Linux parsing.", linux_log_path);
+    }
+
+
     // --- Detection --- //
     let findings = detect_with_rules(&grand_errors_by_identity, &rules);
 
@@ -109,10 +135,10 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     if findings.is_empty() {
         println!("  None");
     } else {
-        for (identity, event, rule, count) in findings {
+        for (identity, event, rule, severity, count) in findings {
             println!(
-                "  [{}] {} :: {} ({} errors)",
-                rule, identity, event, count
+                "  [{}:{}] {} :: {} ({} errors)",
+                rule, severity, identity, event, count
             );
         }
     }
