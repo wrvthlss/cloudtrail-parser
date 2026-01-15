@@ -2,12 +2,20 @@ use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 
 use crate::config::DetectorConfig;
+use crate::findings::Finding;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Severity {
     Low,
     Medium,
     High,
+}
+
+pub struct DetectionRule {
+    pub name: String,
+    pub threshold: u32,
+    pub window_minutes: i64,
+    pub severity: Severity,
 }
 
 impl std::fmt::Display for Severity {
@@ -19,13 +27,6 @@ impl std::fmt::Display for Severity {
         };
         write!(f, "{}", s)
     }
-}
-
-pub struct DetectionRule {
-    pub name: String,
-    pub threshold: u32,
-    pub window_minutes: i64,
-    pub severity: Severity,
 }
 
 
@@ -56,11 +57,11 @@ pub fn detect_suspicious_identities( errors: &HashMap<(String, String), Vec<Date
     suspicious
 }
 
-
 pub fn detect_with_rules(
+    source: &str,
     errors: &HashMap<(String, String), Vec<DateTime<Utc>>>,
     rules: &[DetectionRule],
-) -> Vec<(String, String, String, Severity, u32)> {
+) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     for rule in rules {
@@ -69,22 +70,28 @@ pub fn detect_with_rules(
                 continue;
             }
 
+            // Per-identity/event anchor
             let latest = timestamps.iter().max().unwrap();
             let window_start = *latest - Duration::minutes(rule.window_minutes);
 
-            let windowed_count = timestamps
+            let windowed: Vec<&DateTime<Utc>> = timestamps
                 .iter()
                 .filter(|ts| **ts >= window_start)
-                .count() as u32;
+                .collect();
 
-            if windowed_count > rule.threshold {
-                findings.push((
-                    identity.clone(),
-                    event_name.clone(),
-                    rule.name.clone(),
-                    rule.severity,
-                    windowed_count,
-                ));
+            let count = windowed.len() as u32;
+
+            if count > rule.threshold {
+                findings.push(Finding {
+                    source: source.to_string(),
+                    rule: rule.name.clone(),
+                    severity: rule.severity.clone(),
+                    identity: identity.clone(),
+                    event: event_name.clone(),
+                    count,
+                    window_minutes: rule.window_minutes,
+                    last_seen: *latest,
+                });
             }
         }
     }

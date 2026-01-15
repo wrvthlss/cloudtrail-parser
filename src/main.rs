@@ -3,11 +3,13 @@ mod parser;
 mod detector;
 mod linux_parser;
 mod findings;
+mod state;
 
 use config::DetectorConfig;
 use parser::process_cloudtrail_file;
 use linux_parser::parse_ssh_journal;
-
+use findings::Finding;
+use state::SeenState;
 
 use core::error;
 use std::fs;
@@ -15,9 +17,27 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use std::env;
 
+
 use crate::detector::{DetectionRule, detect_with_rules, Severity};
 
+fn print_findings(findings: &[Finding]) {
+    if findings.is_empty() {
+        println!("  None");
+        return;
+    }
 
+    for f in findings {
+        println!(
+            "  [{}:{:?}] {} :: {} ({} events in {}m)",
+            f.rule,
+            f.severity,
+            f.identity,
+            f.event,
+            f.count,
+            f.window_minutes
+        );
+    }
+}
 
 fn main() -> Result<(), Box<dyn error::Error>> {
     //  --- Parse CLI args ---
@@ -63,6 +83,11 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         },
     ];
 
+    let state_path = ".state/seen.json";
+    let mut state = SeenState::load(state_path);
+    let now = chrono::Utc::now();
+    let ttl_minutes = 60;
+
 
     for entry in fs::read_dir(log_dir)? {
         let entry = entry?;
@@ -101,49 +126,42 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     println!("  Error Events: {}", grand_error_events);
     println!("\n[+] Error Events by Identity:");
 
-    // --- Linux SSH log parsing ---
-    let linux_log_path = "data/ssh.log";
-    if std::path::Path::new(linux_log_path).exists() {
-        println!("\n[*] Parsing Linux sshd log: {}", linux_log_path);
-        let linux_errors = parse_ssh_journal(linux_log_path)?;
-        let linux_findings = detect_with_rules(&linux_errors, &rules);
-
-        println!("\n[!] Linux Detection Findings ({} rule(s)):", rules.len());
-        if linux_findings.is_empty() {
-            println!("  None");
-        } else {
-            for (identity, event, rule, severity, count) in linux_findings {
-                println!(
-                    "  [{}:{}] {} :: {} ({} events)",
-                    rule, severity, identity, event, count
-                );
-            }
-        }
-    } else {
-        println!("\n[*] No Linux ssh log found at {}, skipping Linux parsing.", linux_log_path);
-    }
-
 
     // --- Detection --- //
-    let findings = detect_with_rules(&grand_errors_by_identity, &rules);
+    let linux_log_path = "data/ssh.log";
+    let linux_errors = parse_ssh_journal(linux_log_path)?;
+    let linux_findings = detect_with_rules("Linux/SSH", &linux_errors, &rules);
+    let cloud_findings = detect_with_rules("CloudTrail", &grand_errors_by_identity, &rules);
 
-    
-    println!(
-        "\n[!] Detection Findings ({} rule(s)):",
-        rules.len()
-    );
-    
-    if findings.is_empty() {
+    println!("\n[!] NEW FINDINGS:");
+
+    let mut new_findings = Vec::new();
+
+    for f in cloud_findings.iter().chain(linux_findings.iter()) {
+        let key = f.dedup_key();
+
+        if state.is_new(&key, now, ttl_minutes) {
+            new_findings.push(f.clone());
+            state.mark_seen(key, now);
+        }
+    }
+
+    if new_findings.is_empty() {
         println!("  None");
     } else {
-        for (identity, event, rule, severity, count) in findings {
+        for f in &new_findings {
             println!(
-                "  [{}:{}] {} :: {} ({} errors)",
-                rule, severity, identity, event, count
+                "  [{}:{:?}] {} :: {} ({} events in {}m)",
+                f.rule,
+                f.severity,
+                f.identity,
+                f.event,
+                f.count,
+                f.window_minutes
             );
         }
     }
-    
 
+    state.save(state_path);
     Ok(())
 }
