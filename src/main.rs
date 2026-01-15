@@ -2,6 +2,7 @@ mod config;
 mod parser;
 mod detector;
 mod linux_parser;
+mod findings;
 
 use config::DetectorConfig;
 use parser::process_cloudtrail_file;
